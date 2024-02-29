@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,10 +19,10 @@ func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
 
 	for {
 		select {
-		case <-ctx.Done(): // checks for context.Timeout is out
+		case <-ctx.Done(): // проверка завершения контекста по таймауту
 			close(ch)
 			return
-		default: // but in the meantime it spreads numbers
+		default:
 			counter++
 			ch <- counter
 			fn(counter)
@@ -31,15 +32,11 @@ func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
 
 // Worker читает число из канала in и пишет его в канал out.
 func Worker(in <-chan int64, out chan<- int64) {
-	for {
-		num, ok := <-in
-		if !ok { // channel was closed externally
-			close(out)
-			return
-		}
+	for num := range in {
 		out <- num
-		time.Sleep(1 * time.Millisecond) // sleep 1 ms
+		time.Sleep(1 * time.Millisecond)
 	}
+	close(out)
 }
 
 func main() {
@@ -52,14 +49,11 @@ func main() {
 	// для проверки будем считать количество и сумму отправленных чисел
 	var inputSum int64   // сумма сгенерированных чисел
 	var inputCount int64 // количество сгенерированных чисел
-	var imux sync.Mutex
 
 	// генерируем числа, считая параллельно их количество и сумму
 	go Generator(ctx, chIn, func(i int64) {
-		imux.Lock()
-		inputSum += i
-		inputCount++
-		imux.Unlock()
+		atomic.AddInt64(&inputSum, i)
+		atomic.AddInt64(&inputCount, 1)
 	})
 
 	const NumOut = 5 // количество обрабатывающих горутин и каналов
@@ -77,21 +71,14 @@ func main() {
 	chOut := make(chan int64, NumOut)
 
 	var wg sync.WaitGroup
-	var mux sync.Mutex
 
 	// 4. Собираем числа из каналов outs
 	for idx, ch := range outs {
 		wg.Add(1)
 		go func(in <-chan int64, index int) {
-			for {
-				val, ok := <-in
-				if !ok {
-					wg.Done()
-					break
-				}
-				mux.Lock()
+			defer wg.Done()
+			for val := range in {
 				amounts[index]++
-				mux.Unlock()
 				chOut <- val
 			}
 		}(ch, idx)
